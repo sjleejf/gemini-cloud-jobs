@@ -1,0 +1,49 @@
+name: Self-test (keys, private storage, no secrets in the repo)
+
+# Runs on every push (free: this repo is public). Spends NO Gemini quota unless started by hand
+# with "call" ticked. See jobs/selftest/run.py.
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      call:
+        description: 'Also make ONE tiny Gemini request'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-gemini        # one run at a time across all workflows here: same keys, same usage log
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      JOB: selftest
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
+      GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
+      GEMINI_API_KEY_6: ${{ secrets.GEMINI_API_KEY_6 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Nothing private in the repo
+        run: python check_public.py
+      - name: Pull data
+        run: python cloudstate.py pull selftest
+      - name: Self-test
+        run: python jobs/selftest/run.py ${{ inputs.call && '--call' || '' }}
+      - name: Push data
+        if: ${{ !cancelled() }}
+        run: python cloudstate.py push selftest

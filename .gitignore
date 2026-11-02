@@ -1,0 +1,4 @@
+jobs/*/data/
+__pycache__/
+*.tar.gz
+.env

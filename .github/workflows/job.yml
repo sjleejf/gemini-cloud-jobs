@@ -1,0 +1,55 @@
+name: Run a job
+
+# The generic runner: jobs/<job>/run.py with its private data pulled from / pushed back to the bucket.
+# Started by hand only — there is no schedule, so NOTHING runs on its own until a job is switched on.
+# To switch a job on later: add a `schedule:` cron here (free in a public repo, so it can be frequent;
+# the job itself should exit at once when it has nothing to do or is resting on a daily quota).
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Job folder under jobs/'
+        required: true
+      args:
+        description: 'Extra arguments for run.py'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-gemini
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JOB: ${{ inputs.job }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
+      GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
+      GEMINI_API_KEY_6: ${{ secrets.GEMINI_API_KEY_6 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install requirements
+        run: if [ -f "jobs/$JOB/requirements.txt" ]; then pip install --quiet -r "jobs/$JOB/requirements.txt"; fi
+      - name: Pull data
+        run: python cloudstate.py pull "$JOB"
+      - name: Run
+        env:
+          ARGS: ${{ inputs.args }}
+        run: python "jobs/$JOB/run.py" $ARGS
+      - name: Push data
+        if: ${{ !cancelled() }}
+        run: python cloudstate.py push "$JOB"
