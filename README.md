@@ -19,6 +19,18 @@ around every run (`cloudstate.py`). API keys and the database key are repository
 | `.github/workflows/selftest.yml` | runs the self-test on every push. |
 | `.github/workflows/job.yml` | the generic runner, **manual only** — no job runs on a schedule. |
 
+## Job `calls` (built 2026-11-13, NOT switched on until the owner says so)
+Phone-call recordings (Dropbox ← Dropsync Pro on the phone) → Gemini audio → transcripts with who-said-what back in
+Dropbox, read by the PC index (`@내 개인 자료 색인\src_calls.py`). `jobs/calls/`: `run.py` (the job), `transcribe.py`
+(audio → mp3 → Gemini → Samsung-style transcript text), `dbx.py` (Dropbox API, team-space root header),
+`dropbox_auth.py` (one-time PC sign-in, PKCE). Workflow `calls.yml` (every 30 min; the job exits at once when idle).
+Secrets needed in addition to the 6 Gemini keys + Supabase: `DROPBOX_APP_KEY`, `DROPBOX_REFRESH_TOKEN`. Job data in the
+bucket: `ref.mp3` (the owner's voice sample, `python cloudstate.py seed calls <folder with ref.mp3>`), `state.json`.
+Own request budget per Gemini quota day (the PC pacer cannot see this runner): 40 for the back catalogue + 25 for
+fresh calls (≤ 3 days old), ≤ 6 per run; calls packed by audio length (≈ 45 min per request). **Public logs: the job
+prints counts only — never a file name or call text.** A public repo's schedule is switched off by GitHub after 60 days
+without repo activity — re-enable it in the Actions tab (or push anything).
+
 ## Adding a job
 
 1. `jobs/<name>/run.py` (+ `requirements.txt` if it needs packages). Read and write only under

@@ -119,8 +119,10 @@ def _one_model(model, body, timeout, task, units):
 
 
 def generate(prompt, models, *, system=None, json_mode=False, temperature=None, max_tokens=None,
-             timeout=300, task='', units=None):
-    """(model, text) from the first model in `models` that answers; GeminiError if none does."""
+             timeout=300, task='', units=None, parts=None):
+    """(model, text) from the first model in `models` that answers; GeminiError if none does.
+    `parts` (optional) = the whole user message as Gemini parts, e.g. text + {'inline_data': {...}} audio; then
+    `prompt` is ignored."""
     cfg = {}
     if json_mode:
         cfg['responseMimeType'] = 'application/json'
@@ -128,7 +130,7 @@ def generate(prompt, models, *, system=None, json_mode=False, temperature=None, 
         cfg['temperature'] = temperature
     if max_tokens:
         cfg['maxOutputTokens'] = max_tokens
-    body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}]}
+    body = {'contents': [{'role': 'user', 'parts': parts or [{'text': prompt}]}]}
     if system:
         body['systemInstruction'] = {'parts': [{'text': system}]}
     if cfg:

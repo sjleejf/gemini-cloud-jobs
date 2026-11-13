@@ -1,0 +1,57 @@
+name: Calls (phone-call transcripts)
+
+# Phone recordings (Dropbox, uploaded by Dropsync) → Gemini → transcripts back in Dropbox. See jobs/calls/run.py.
+# Runs by itself every 30 minutes; the job exits at once when nothing is waiting or today's own request budget is
+# spent (CALLS_DAY_CAP / the "new" allowance in run.py). Public repo → free minutes and PUBLIC logs: the job prints
+# counts only, never a file name or any call text.
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+    inputs:
+      args:
+        description: 'Extra arguments for run.py'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-gemini            # shared with job.yml / selftest.yml: same keys, same usage log
+  cancel-in-progress: false
+
+jobs:
+  calls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JOB: calls
+      JOB_SOURCE: 내 개인 자료 색인
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
+      GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
+      GEMINI_API_KEY_6: ${{ secrets.GEMINI_API_KEY_6 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: ffmpeg
+        run: which ffmpeg ffprobe >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+      - name: Pull data
+        run: python cloudstate.py pull calls
+      - name: Run
+        env:
+          ARGS: ${{ inputs.args }}
+        run: python jobs/calls/run.py $ARGS
+      - name: Push data
+        if: ${{ !cancelled() }}
+        run: python cloudstate.py push calls
