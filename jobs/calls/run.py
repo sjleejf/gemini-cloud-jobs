@@ -105,6 +105,9 @@ def main():
     today = quota_day()
     if st.get('day') != today:
         st.update(day=today, n={'old': 0, 'new': 0})
+    if time.time() < st.get('rest_until', 0):                    # Gemini was busy last time: rest (every try spends quota)
+        say(f'resting after Gemini errors ({st.get("fails", 0)} in a row) — {round((st["rest_until"] - time.time()) / 60)} min left')
+        return
     say(f'quota day {today}: back-catalogue requests {st["n"]["old"]}/{CAP["old"]}, fresh {st["n"]["new"]}/{CAP["new"]}')
 
     box = dbx.Dropbox()
@@ -176,10 +179,14 @@ def main():
             for k, (p, _off) in enumerate(pieces):
                 items.append((info[3] + (f' (이 통화의 {k + 1}/{len(pieces)}번째 부분)' if len(pieces) > 1 else ''), p)); n += 1
             spans.append((first, n))
-        try:
-            result, model, _raw = T.transcribe(items, REF)
+        fails = st.get('fails', 0)
+        try:                                                      # ONE model per try (a 503 spends quota on every model asked);
+            result, model, _raw = T.transcribe(items, REF, models=[T.MODELS[fails % 2]])   # 3.6, then 3.8 after a failure
+            st['fails'], st['rest_until'] = 0, 0
         except gemini.GeminiError as e:
-            say(f'  Gemini did not answer ({str(e)[:100]}); stopping for now')   # not the call's fault: no attempt counted
+            fails += 1                                            # not the call's fault: no attempt counted against it
+            st['fails'], st['rest_until'] = fails, time.time() + min(14400, 2700 * 2 ** (fails - 1))   # 45 min, 90, 180, 240 …
+            say(f'  Gemini did not answer ({str(e)[:60].splitlines()[0]}); resting {round((st["rest_until"] - time.time()) / 60)} min')
             save_state(st)
             break
         written = 0

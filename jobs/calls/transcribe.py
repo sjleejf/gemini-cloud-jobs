@@ -156,9 +156,9 @@ def to_samsung_layout(result, counterpart):
     return '\n'.join(out)
 
 
-def transcribe(items, ref_mp3=None, task='sjindex_calls'):
-    """items [(name, mp3)] → ({N: result}, model). One Gemini request."""
+def transcribe(items, ref_mp3=None, task='sjindex_calls', models=None):
+    """items [(name, mp3)] → ({N: result}, model, raw text). One Gemini request (one model unless `models` has more)."""
     parts = build_parts(items, ref_mp3)
-    model, text = gemini.generate(None, MODELS, parts=parts, max_tokens=60000, timeout=900, task=task,
+    model, text = gemini.generate(None, models or MODELS, parts=parts, max_tokens=60000, timeout=900, task=task,
                                   units=len(items))
     return parse_answer(text), model, text
