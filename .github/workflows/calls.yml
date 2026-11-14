@@ -46,6 +46,8 @@ jobs:
           python-version: '3.12'
       - name: ffmpeg
         run: which ffmpeg ffprobe >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+      - name: Runner region (diagnostic, country only)
+        run: curl -s --max-time 10 https://ipinfo.io/country || echo "country lookup failed"
       - name: Pull data
         run: python cloudstate.py pull calls
       - name: Run
