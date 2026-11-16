@@ -19,7 +19,11 @@ around every run (`cloudstate.py`). API keys and the database key are repository
 | `.github/workflows/selftest.yml` | runs the self-test on every push. |
 | `.github/workflows/job.yml` | the generic runner, **manual only** — no job runs on a schedule. |
 
-## Job `calls` (built 2026-11-13, NOT switched on until the owner says so)
+## Job `calls` (built + pushed 2026-11-13; scheduled; transcribing since 2026-11-14)
+**Status 2026-11-16:** works end to end (~120 transcripts). The 403 `"free tier is not available for this project"` comes
+only from keys 1 and 6 when asked from the runner (they work from the PC); keys 2–5 work. **Fixed 2026-11-16:** `gemini.py`
+now skips a key that gives that 403 and remembers it in `data/_key_skip.json` (re-asked after 7 days), so the run goes on
+with the other keys instead of resting. GitHub's cron fires every 4–7 h here, not every 30 min.
 Phone-call recordings (Dropbox ← Dropsync Pro on the phone) → Gemini audio → transcripts with who-said-what back in
 Dropbox, read by the PC index (`@내 개인 자료 색인\src_calls.py`). `jobs/calls/`: `run.py` (the job), `transcribe.py`
 (audio → mp3 → Gemini → Samsung-style transcript text), `dbx.py` (Dropbox API, team-space root header),

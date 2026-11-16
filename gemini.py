@@ -13,6 +13,9 @@ Rules — each one learned the expensive way on the free tier (memory reference_
 - 503 is per MODEL, so every key gets the same answer: give the model up at once, never walk the keys.
 - 429 is per key: try the next key. A per-day 429 parks that key for this model for the rest of the run.
 - Other 5xx: one short retry on the same key, then the next key. Other 4xx: fail at once.
+- 403 "free tier is not available for this project" is per KEY (keys 1 and 6 get it from the US runner, though
+  they work from the PC): skip that key and remember it in jobs/<JOB>/data/_key_skip.json, so later runs don't
+  ask it again; it is asked once more after SKIP_RECHECK_DAYS in case Google changes its mind.
 - The starting key rotates (random per run), so no single key is always spent first.
 Every response is logged to jobs/<JOB>/data/_usage.jsonl in the PC's usage.jsonl shape; cloudstate.py
 push moves it to the shared cloud log.
@@ -43,6 +46,34 @@ def keys():
 
 _START = random.randrange(6)
 _PARKED = set()          # (model, label) that answered a per-day 429 during this run
+SKIP_RECHECK_DAYS = 7
+
+
+def _skip_path():
+    return os.path.join(HERE, 'jobs', JOB, 'data', '_key_skip.json') if JOB else None
+
+
+def _skipped():
+    """{label: unix time it was refused} for keys refused with 'free tier not available', still within the recheck window."""
+    p = _skip_path()
+    try:
+        with open(p, encoding='utf-8') as f:
+            d = json.load(f)
+    except Exception:
+        return {}
+    cut = time.time() - SKIP_RECHECK_DAYS * 86400
+    return {k: v for k, v in d.items() if v >= cut}
+
+
+def _skip_key(label):
+    d = _skipped()
+    d[label] = int(time.time())
+    p = _skip_path()
+    if p:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(d, f)
+    print(f'  {label}: Google says free tier is not available for its project here -> key skipped')
 
 
 def _log(label, model, r, task, units, **extra):
@@ -75,8 +106,9 @@ def _one_model(model, body, timeout, task, units):
         raise GeminiError('no GEMINI_API_KEY_n in env')
     order = [pool[(_START + j) % len(pool)] for j in range(len(pool))]
     last = None
+    skipped = _skipped()
     for label, key in order:
-        if (model, label) in _PARKED:
+        if (model, label) in _PARKED or label in skipped:
             continue
         for attempt in (1, 2):
             t0 = time.time()
@@ -92,6 +124,10 @@ def _one_model(model, body, timeout, task, units):
                     if 'PerDay' in detail:
                         _PARKED.add((model, label))
                     break                                   # next key
+                if e.code == 403 and 'free tier' in detail.lower():
+                    _skip_key(label)                        # this key's project has no free tier here: next key
+                    skipped[label] = 1
+                    break
                 if e.code == 503:
                     raise GeminiError(last)                 # whole model busy: stop, don't walk keys
                 if e.code >= 500 and attempt == 1:
