@@ -112,17 +112,22 @@ def main():
 
     box = dbx.Dropbox()
     files = box.list_all(ARCHIVE)
+    have = set()                                                  # transcripts that already exist (made by the PC job or shared by hand)
+    for t in box.list_all(TEXT):
+        m = _NAME.match(t['name'])
+        if m:
+            have.add(f"{m['who'].strip()}|{m['d']}_{m['t']}")
     cand = []
     for f in files:
         info = call_info(f['name'])
-        if not info or info[0] in st['done']:
+        if not info or info[0] in st['done'] or info[0] in have:
             continue
         if f['size'] < MIN_BYTES:
             st['done'][info[0]] = {'s': 'empty'}
             continue
         cand.append((info[1], info[2], f, info))
     cand.sort(key=lambda c: (c[0], c[1]), reverse=True)          # newest first
-    say(f'{len(files)} files in the archive, {len(cand)} calls waiting')
+    say(f'{len(files)} files in the archive, {len(have)} transcripts exist, {len(cand)} calls waiting')
     save_state(st)
     if not cand:
         return
