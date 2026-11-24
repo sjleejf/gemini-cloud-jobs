@@ -35,6 +35,17 @@ fresh calls (≤ 3 days old), ≤ 6 per run; calls packed by audio length (≈ 4
 prints counts only — never a file name or call text.** A public repo's schedule is switched off by GitHub after 60 days
 without repo activity — re-enable it in the Actions tab (or push anything).
 
+## Job `segcut` (built + switched on 2026-11-24; Gemini cuts the Bible for the 떠디 app, around the clock)
+`jobs/segcut/run.py` + workflow `segcut.yml`. The PC (`@SJ's H∕G 떠디\scripts\seg_v2\segcut_queue.py`) puts batches (prompt =
+rules + atoms) into the private bucket under `segcut/queue/`; this job answers them one by one with Gemini (3.6-flash all day,
+3.8-flash only in its good hours), checks each answer with a copy of `seg_v2.validate`, and stores it in `segcut/answers/`.
+The PC task `SegCutIngest` receives the answers, applies them and publishes a book when its last batch is in — the cloud never
+touches the app or the database. **Budget (per quota day, every request counts):** 3.6 = 28, 3.8 = 30, both in `config.json`
+in the bucket and mirrored in the PC's `@Gemini 관련\cloud_budget.json` so the PC pacer keeps them out of its own share.
+Each run loops ~5 h and starts the next one itself (cron every 3 h only restarts a broken chain). Stop: `segcut_queue.py stop`.
+Keys 1 and 6 are refused by Google (HTTP 403 “free tier is not available for this project”) from everywhere, so only keys 2–5
+work; `gemini.py` skips them by itself. Logs are public: batch ids and counts only.
+
 ## Adding a job
 
 1. `jobs/<name>/run.py` (+ `requirements.txt` if it needs packages). Read and write only under

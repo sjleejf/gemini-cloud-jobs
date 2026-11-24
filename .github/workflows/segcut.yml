@@ -1,0 +1,57 @@
+name: Segcut (Gemini cuts the Bible for 떠디)
+
+# Gemini cuts the remaining Bible books into short reading pieces, around the clock. See jobs/segcut/run.py.
+# One run loops for ~5 h (it sends a request only when its daily budget and the clock allow, ~1 every 10-50 min), then starts
+# the next run itself, so there is no gap even though GitHub's cron fires only every few hours. The cron below is just the
+# safety net that restarts the chain if it ever breaks; the job exits at once when the queue is empty or config.json says
+# "enabled": false.  Public repo → free minutes and PUBLIC logs: the job prints batch ids and counts only.
+# Stop it: on the PC `python scripts/seg_v2/segcut_queue.py stop` (or disable this workflow in the Actions tab).
+
+on:
+  push:
+    paths:
+      - 'jobs/segcut/**'
+      - '.github/workflows/segcut.yml'
+  schedule:
+    - cron: '23 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write            # to start the next run (workflow_dispatch by GITHUB_TOKEN does start a run)
+
+concurrency:
+  group: cloud-segcut       # its own group: it must not hold up the phone-call job (cloud-gemini)
+  cancel-in-progress: false
+
+jobs:
+  segcut:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    env:
+      JOB: segcut
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
+      GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
+      GEMINI_API_KEY_6: ${{ secrets.GEMINI_API_KEY_6 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cut (pulls and pushes its own state)
+        id: run
+        run: python -X utf8 jobs/segcut/run.py
+      - name: Hand over to the next run
+        if: ${{ !cancelled() && steps.run.outputs.more != 'false' }}
+        run: |
+          # a crash (no output) waits two minutes first, so a broken run can never spin
+          if [ "${{ steps.run.outcome }}" != "success" ]; then sleep 120; fi
+          curl -sS -o /dev/null -w "next run requested: HTTP %{http_code}\n" -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/segcut.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
