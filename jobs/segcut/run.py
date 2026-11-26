@@ -2,7 +2,7 @@
 """segcut — Gemini cuts the Bible into short reading pieces for the 떠디 app (@SJ's H∕G 떠디), 24 hours a day.
 
 What it does: takes the next unanswered batch from the queue the PC prepared, sends it to Gemini (3.6-flash all day,
-3.8-flash only in its good hours), checks the answer with the same rules the PC applies (`validate_answer`, a copy of
+3.8-flash only in its good hours; since 2026-11-26 the Hydrogen trial goes first, see below), checks the answer with the same rules the PC applies (`validate_answer`, a copy of
 seg_v2.validate), and stores it. The PC (task SegCutIngest, receive-only) picks the answers up, applies them, and
 publishes a book when its last batch is in. This job never touches the app, the database or any Bible text of its own:
 the queue items (prompt = rules + atoms with glosses) live in the PRIVATE bucket `cloud-jobs`.
@@ -16,6 +16,12 @@ Bucket layout (all under  segcut/ ):
   answers/<Book>/<bNNN>.json  {model, at, text}                                           (this job writes)
   status.json                 today's spend, stuck batches, last run                      (this job writes)
   data.tar.gz                 state.json + _key_skip.json (the standard pull/push of the runner)
+
+Hydrogen trial (owner, 2026-11-26): the model in config 'trial' gets the first chance at a batch. If it does not answer,
+or its answer fails the check, the SAME batch goes straight on to 3.8-flash (good hours) and then 3.6-flash, within each
+one's own budget and spacing. A rejected or cut-off trial answer does not count against the batch. status.json keeps
+'tally' (per model: asked / answered / rejected / busy / ...) and 'recent' (the last 300 requests) for the owner's report
+(PC: hydrogen_report.py). To stop the trial put "trial": {"enabled": false} in segcut/config.json.
 
 Budget: each model has a `daily` number of REQUESTS per quota day (00:00 Los Angeles) — every request counts, a 503
 too. The PC pacer (@Gemini 관련\\pacer.py) knows these numbers through cloud_budget.json and keeps them out of its own
@@ -64,6 +70,7 @@ DEFAULTS = {
         'gemini-3.6-flash': {'daily': 28},
         'gemini-3.8-flash': {'daily': 30, 'kst_hours': [4, 5, 6, 7, 9, 10, 13, 14]},
     },
+    'trial': {'enabled': True, 'model': 'gemini-4-hydrogen', 'daily': 20, 'timeout': 420, 'max_output_tokens': 65536},
     'temperature': 0.2,
     'max_output_tokens': 32768,
     'timeout': 240,
@@ -109,7 +116,7 @@ def load_state():
     except Exception:
         st = {}
     for k, v in (('day', ''), ('spent', {}), ('ok', {}), ('last_ts', {}), ('rest_until', {}), ('parked_until', {}),
-                 ('fails', {}), ('stuck', {})):
+                 ('fails', {}), ('stuck', {}), ('tally', {}), ('recent', [])):
         st.setdefault(k, v)
     return st
 
@@ -194,6 +201,92 @@ def eligible(model, mcfg, cfg, st, now):
     return None
 
 
+def chain_models(cfg):
+    """{model: settings} in the order they are asked: the trial model, then 3.8 (the one gated to good hours), then
+    the rest. With the trial off, just the configured models."""
+    flash = sorted(cfg['models'].items(), key=lambda kv: 0 if kv[1].get('kst_hours') else 1)
+    t = cfg.get('trial') or {}
+    head = [(t['model'], t)] if t.get('enabled') and t.get('model') else []
+    return dict(head + [kv for kv in flash if not head or kv[0] != head[0][0]])
+
+
+def note_attempt(st, model, batch, outcome, secs, pieces=None, words=None, detail=None):
+    t = st['tally'].setdefault(model, {})
+    t['asked'] = t.get('asked', 0) + 1
+    t[outcome] = t.get(outcome, 0) + 1
+    rec = {'at': int(time.time()), 'batch': batch, 'model': model, 'outcome': outcome, 'secs': round(secs, 1)}
+    for k, v in (('pieces', pieces), ('words', words), ('detail', detail)):
+        if v is not None:
+            rec[k] = v
+    st['recent'] = (st['recent'] + [rec])[-300:]
+
+
+def attempt(model, mcfg, cfg, st, b, item, answers, index):
+    """One request for batch b on `model`. -> (outcome, answers, requests_sent). outcome: 'answered' = stored, done;
+    'next' = hand the same batch to the next model; 'stop' = leave the batch for a later round."""
+    now = time.time()
+    trial = model == (cfg.get('trial') or {}).get('model')
+    tag = model.replace('gemini-', '').replace('-flash', '')
+    n0 = len(usage_count())
+    st['last_ts'][model] = now
+    err = text = used = None
+    try:
+        used, text = gemini.generate(item['prompt'], [model], json_mode=True, temperature=cfg['temperature'],
+                                     max_tokens=mcfg.get('max_output_tokens') or cfg['max_output_tokens'],
+                                     timeout=mcfg.get('timeout') or cfg['timeout'],
+                                     task='segcut', units=item.get('words'), give_up_on_timeout=trial)
+    except gemini.GeminiError as e:
+        err = str(e)
+    secs = time.time() - now
+    lines = usage_count()[n0:]
+    for r in lines:                                    # every request counts, a 503 too
+        st['spent'][r['model']] = st['spent'].get(r['model'], 0) + 1
+    sent = max(1, len(lines))
+    if err is not None:
+        if 'every key parked' in err or ('HTTP 429' in err and 'PerDay' in err):
+            kind = 'quota'
+            st['parked_until'][model] = la_midnight_after(now) + 120
+            say(f'segcut: {b["id"]} {tag}: every key out of daily quota until the next quota day')
+        elif 'HTTP 503' in err:
+            kind = 'busy'
+            st['rest_until'][model] = time.time() + cfg['rest_min_503'] * 60
+            say(f'segcut: {b["id"]} {tag}: busy (503) — resting that model {cfg["rest_min_503"]} min')
+        elif 'MAX_TOKENS' in err:
+            kind = 'cut_off'
+            if not trial:
+                st['fails'][b['id']] = st['fails'].get(b['id'], 0) + 1
+            say(f'segcut: {b["id"]} {tag}: answer cut off (MAX_TOKENS)')
+        else:
+            kind = 'timeout' if 'timed out' in err.lower() else 'quota' if 'HTTP 429' in err else 'other_error'
+            st['rest_until'][model] = time.time() + cfg['rest_min_other'] * 60
+            say(f'segcut: {b["id"]} {tag}: {err.split(":")[0][:60]} — resting {cfg["rest_min_other"]} min')
+        note_attempt(st, model, b['id'], kind, secs, words=item.get('words'), detail=err[:200])
+        return 'next', answers, sent
+    n, problem = validate_answer(item['atoms'], parse_answer(text))
+    if problem:
+        say(f'segcut: {b["id"]} {tag}: answer rejected ({problem})')
+        note_attempt(st, model, b['id'], 'rejected', secs, words=item.get('words'), detail=problem)
+        if trial:                                      # a trial answer never pushes a batch aside
+            return 'next', answers, sent
+        st['fails'][b['id']] = st['fails'].get(b['id'], 0) + 1
+        say(f'segcut: {b["id"]}: fail {st["fails"][b["id"]]}')
+        if st['fails'][b['id']] >= cfg['max_fails']:
+            st['stuck'][b['id']] = problem
+        return 'stop', answers, sent
+    at = int(time.time())
+    jput(f'answers/{b["id"]}.json', {'model': used, 'at': at, 'text': text})
+    answers = jget('answers/index.json') or {'done': {}}
+    answers['done'][b['id']] = {'model': used, 'ts': at}
+    jput('answers/index.json', answers)
+    st['ok'][model] = st['ok'].get(model, 0) + 1
+    st['fails'].pop(b['id'], None)
+    st['stuck'].pop(b['id'], None)
+    note_attempt(st, model, b['id'], 'answered', secs, pieces=n, words=item.get('words'))
+    say(f'segcut: {b["id"]} {tag}: ok, {n} pieces ({item.get("words")} words); '
+        f'{len(answers["done"])}/{len(index["batches"])} answered')
+    return 'answered', answers, sent
+
+
 def usage_count():
     p = os.path.join(DATA, '_usage.jsonl')
     try:
@@ -224,7 +317,8 @@ def write_status(st, index, answers, cfg, now, note=''):
         'quota_day': st['day'], 'spent_today': st['spent'], 'answers_ok_today': st['ok'],
         'batches_total': total, 'batches_answered': len([1 for b in index.get('batches', []) if b['id'] in done]),
         'stuck': st['stuck'], 'note': note,
-        'budget': {m: v.get('daily') for m, v in cfg['models'].items()},
+        'budget': {m: v.get('daily') for m, v in chain_models(cfg).items()},
+        'tally': st['tally'], 'recent': st['recent'],
     })
 
 
@@ -237,7 +331,7 @@ def main():
     answers = jget('answers/index.json') or {'done': {}}
     redo = jget('redo.json') or {}
     say(f'segcut: {len(index["batches"])} batches in the queue, {len(answers["done"])} answered, '
-        f'models {", ".join(cfg["models"])}')
+        f'models {", ".join(chain_models(cfg))}')
     more = False
     last_cfg_read = t0
     max_req = int(os.environ.get('SEGCUT_MAX_REQUESTS', '0') or 0)     # test knob: stop after this many Gemini requests
@@ -269,16 +363,9 @@ def main():
             say('segcut: nothing left to cut (queue empty or every open batch set aside)')
             write_status(st, index, answers, cfg, now, 'queue empty')
             break
-        model, mcfg, why = None, None, []
-        for m, c in cfg['models'].items():
-            r = eligible(m, c, cfg, st, now)
-            if r is None:
-                # a model with good-hours gating goes first when it is open: its allowance is otherwise unused
-                if model is None or c.get('kst_hours'):
-                    model, mcfg = m, c
-            else:
-                why.append(f'{m.replace("gemini-", "").replace("-flash", "")}: {r}')
-        if model is None:
+        models = chain_models(cfg)
+        open_models = [m for m, c in models.items() if eligible(m, c, cfg, st, now) is None]
+        if not open_models:
             time.sleep(60)
             continue
         b = todo[0]
@@ -289,55 +376,16 @@ def main():
             st['stuck'][b['id']] = 'item missing'
             save_state(st)
             continue
-        n0 = len(usage_count())
-        st['last_ts'][model] = time.time()
-        err = None
-        text = None
-        try:
-            used, text = gemini.generate(item['prompt'], [model], json_mode=True, temperature=cfg['temperature'],
-                                         max_tokens=cfg['max_output_tokens'], timeout=cfg['timeout'],
-                                         task='segcut', units=item.get('words'))
-        except gemini.GeminiError as e:
-            err = str(e)
-        lines = usage_count()[n0:]
-        sent += max(1, len(lines))
-        for r in lines:                                    # every request counts, a 503 too
-            st['spent'][r['model']] = st['spent'].get(r['model'], 0) + 1
-        tag = model.replace('gemini-', '').replace('-flash', '')
-        if err is not None:
-            if 'every key parked' in err or ('HTTP 429' in err and 'PerDay' in err):
-                st['parked_until'][model] = la_midnight_after(now) + 120
-                say(f'segcut: {b["id"]} {tag}: every key out of daily quota until the next quota day')
-            elif 'HTTP 503' in err:
-                st['rest_until'][model] = time.time() + cfg['rest_min_503'] * 60
-                say(f'segcut: {b["id"]} {tag}: busy (503) — resting that model {cfg["rest_min_503"]} min')
-            elif 'MAX_TOKENS' in err:
-                st['fails'][b['id']] = st['fails'].get(b['id'], 0) + 1
-                say(f'segcut: {b["id"]} {tag}: answer cut off (MAX_TOKENS), fail {st["fails"][b["id"]]}')
-            else:
-                st['rest_until'][model] = time.time() + cfg['rest_min_other'] * 60
-                say(f'segcut: {b["id"]} {tag}: {err.split(":")[0][:60]} — resting {cfg["rest_min_other"]} min')
-        else:
-            n, problem = validate_answer(item['atoms'], parse_answer(text))
-            if problem:
-                st['fails'][b['id']] = st['fails'].get(b['id'], 0) + 1
-                say(f'segcut: {b["id"]} {tag}: answer rejected ({problem}), fail {st["fails"][b["id"]]}')
-                if st['fails'][b['id']] >= cfg['max_fails']:
-                    st['stuck'][b['id']] = problem
-            else:
-                at = int(time.time())
-                jput(f'answers/{b["id"]}.json', {'model': used, 'at': at, 'text': text})
-                answers = jget('answers/index.json') or {'done': {}}
-                answers['done'][b['id']] = {'model': used, 'ts': at}
-                jput('answers/index.json', answers)
-                st['ok'][model] = st['ok'].get(model, 0) + 1
-                st['fails'].pop(b['id'], None)
-                st['stuck'].pop(b['id'], None)
-                say(f'segcut: {b["id"]} {tag}: ok, {n} pieces ({item.get("words")} words); '
-                    f'{len(answers["done"])}/{len(index["batches"])} answered')
-        save_state(st)
-        write_status(st, index, answers, cfg, time.time())
-        cloudstate.push(JOB)                                # state + usage lines (CapsLock+Q) after every request
+        for model in open_models:                          # first chance to the trial model, then fall back in order
+            if max_req and sent >= max_req:
+                break
+            outcome, answers, used_requests = attempt(model, models[model], cfg, st, b, item, answers, index)
+            sent += used_requests
+            save_state(st)
+            write_status(st, index, answers, cfg, time.time())
+            cloudstate.push(JOB)                            # state + usage lines (CapsLock+Q) after every request
+            if outcome != 'next':
+                break
         # re-read what the PC may have changed
         redo = jget('redo.json') or redo
     save_state(st)

@@ -42,6 +42,10 @@ rules + atoms) into the private bucket under `segcut/queue/`; this job answers t
 The PC task `SegCutIngest` receives the answers, applies them and publishes a book when its last batch is in — the cloud never
 touches the app or the database. **Budget (per quota day, every request counts):** 3.6 = 28, 3.8 = 30, both in `config.json`
 in the bucket and mirrored in the PC's `@Gemini 관련\cloud_budget.json` so the PC pacer keeps them out of its own share.
+**Hydrogen trial (2026-11-26):** `gemini-4-hydrogen` gets the first chance at a batch (20 requests/day, 420 s limit); if it
+does not answer or fails the check, the same batch goes on to 3.8-flash (good hours) and then 3.6-flash. A bad trial answer
+never counts against the batch. `status.json` keeps `tally` + `recent`; PC report: `@Gemini 관련\hydrogen_report.py`.
+Off switch: `"trial": {"enabled": false}` in `segcut/config.json`.
 Each run loops ~5 h and starts the next one itself (cron every 3 h only restarts a broken chain). Stop: `segcut_queue.py stop`.
 Keys 1 and 6 are refused by Google (HTTP 403 “free tier is not available for this project”) from everywhere, so only keys 2–5
 work; `gemini.py` skips them by itself. Logs are public: batch ids and counts only.

@@ -100,7 +100,7 @@ def _post(model, key, body, timeout):
         return json.loads(r.read())
 
 
-def _one_model(model, body, timeout, task, units):
+def _one_model(model, body, timeout, task, units, give_up_on_timeout=False):
     pool = keys()
     if not pool:
         raise GeminiError('no GEMINI_API_KEY_n in env')
@@ -139,6 +139,8 @@ def _one_model(model, body, timeout, task, units):
             except Exception as e:                          # timeout / network
                 _log(label, model, 'error', task, units, pc=len(body), dur=int((time.time() - t0) * 1000))
                 last = f'{type(e).__name__} {model} {label}: {e}'
+                if give_up_on_timeout and 'timed out' in str(e).lower():
+                    raise GeminiError(last)                 # a slow model, not a bad key: don't wait again on the next one
                 break
             um = p.get('usageMetadata') or {}
             cand = (p.get('candidates') or [{}])[0]
@@ -155,7 +157,7 @@ def _one_model(model, body, timeout, task, units):
 
 
 def generate(prompt, models, *, system=None, json_mode=False, temperature=None, max_tokens=None,
-             timeout=300, task='', units=None, parts=None):
+             timeout=300, task='', units=None, parts=None, give_up_on_timeout=False):
     """(model, text) from the first model in `models` that answers; GeminiError if none does.
     `parts` (optional) = the whole user message as Gemini parts, e.g. text + {'inline_data': {...}} audio; then
     `prompt` is ignored."""
@@ -175,7 +177,7 @@ def generate(prompt, models, *, system=None, json_mode=False, temperature=None, 
     errs = []
     for m in models:
         try:
-            return m, _one_model(m, raw, timeout, task, units)
+            return m, _one_model(m, raw, timeout, task, units, give_up_on_timeout)
         except GeminiError as e:
             errs.append(str(e))
             print(f'  {m} failed -> next model: {str(e)[:160]}')
